@@ -1,212 +1,201 @@
 <?php
-/**
- * Rutas principales de la API
- */
-
+// Importa la clase Response para enviar respuestas JSON uniformes.
 require_once __DIR__ . '/../utils/Response.php';
 
-// ==============================================
-// CORS (desarrollo)
-// ==============================================
+// Activa la visualización de errores para desarrollo.
+// En producción esto debe estar desactivado.
+ini_set('display_errors', 1);
+ini_set('display_startup_errors', 1);
+error_reporting(E_ALL);
 
-// Lista de orígenes permitidos para consumir la API durante desarrollo
-$allowed = ['http://localhost:4200', 'http://127.0.0.1:4200'];
-$origin = $_SERVER['HTTP_ORIGIN'] ?? '';
+/* ==========================
+   CORS
+   Configura permisos para permitir peticiones desde Angular (localhost:4200).
+========================== */
 
-// Si el origen está permitido, se habilita acceso CORS
-if (in_array($origin, $allowed, true)) {
-    header("Access-Control-Allow-Origin: $origin");
-} else {
-    // Valor por defecto cuando el origen no coincide
-    header("Access-Control-Allow-Origin: http://localhost:4200");
-}
+// Orígenes permitidos
+$allowed = ['http://localhost:4200'];
 
-// Métodos y cabeceras permitidas
+// Obtiene el origen de la petición o usa '*' si no existe.
+$origin = $_SERVER['HTTP_ORIGIN'] ?? '*';
+
+// Cabecera que permite solicitudes desde el origen especificado.
+header("Access-Control-Allow-Origin: $origin");
+
+// Métodos HTTP permitidos.
 header("Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS");
+
+// Cabeceras custom permitidas (incluye Authorization para tokens).
 header("Access-Control-Allow-Headers: Content-Type, Authorization");
+
+// Permitimos envío de cookies / credenciales.
 header("Access-Control-Allow-Credentials: true");
 
-// Respuesta inmediata a las peticiones preflight
-if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
-    http_response_code(200);
-    exit;
+// Si es solicitud preflight (OPTIONS), finalizamos inmediatamente.
+if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') exit;
+
+/* ==========================
+   HELPERS
+========================== */
+
+// Lee el cuerpo JSON de una solicitud y lo convierte a array PHP.
+function readBody() {
+    $raw = file_get_contents('php://input');
+    return json_decode($raw, true) ?: []; // Devuelve array vacío si no es JSON.
 }
 
-// ==============================================
-// HELPERS
-// ==============================================
+// Obtiene token Bearer del header Authorization.
+function getBearerToken() {
 
-/**
- * Obtiene y decodifica el cuerpo de la solicitud.
- * - Si el Content-Type es JSON, se decodifica.
- * - Si es form-data o x-www-form-urlencoded, se usa $_POST.
- */
-function readBody(): array {
-    $ct = $_SERVER['CONTENT_TYPE'] ?? $_SERVER['HTTP_CONTENT_TYPE'] ?? '';
+    // Usa getallheaders si existe (dependiendo del servidor).
+    if (function_exists('getallheaders')) {
+        $headers = getallheaders();
 
-    if (stripos($ct, 'application/json') !== false) {
-        $raw = file_get_contents('php://input');
-        $data = json_decode($raw, true);
-        return is_array($data) ? $data : [];
-    }
-
-    if (!empty($_POST)) return $_POST;
-
-    return [];
-}
-
-/**
- * Extrae el token JWT del encabezado Authorization.
- * Acepta formatos: "Authorization: Bearer token".
- */
-function getBearerToken(): ?string {
-    if (function_exists('apache_request_headers')) {
-        $headers = apache_request_headers();
+        // Busca el header Authorization con formato: Bearer <token>
         if (!empty($headers['Authorization']) &&
-            preg_match('/Bearer\s(\S+)/', $headers['Authorization'], $m)) {
+            preg_match('/Bearer\s+(\S+)/', $headers['Authorization'], $m))
             return $m[1];
-        }
     }
 
+    // Alternativa en servidores que exponen el header como HTTP_AUTHORIZATION
     if (!empty($_SERVER['HTTP_AUTHORIZATION']) &&
-        preg_match('/Bearer\s(\S+)/', $_SERVER['HTTP_AUTHORIZATION'], $m)) {
+        preg_match('/Bearer\s+(\S+)/', $_SERVER['HTTP_AUTHORIZATION'], $m))
         return $m[1];
-    }
 
+    // Caso apache con variable REDIRECT_HTTP_AUTHORIZATION
+    if (!empty($_SERVER['REDIRECT_HTTP_AUTHORIZATION']) &&
+        preg_match('/Bearer\s+(\S+)/', $_SERVER['REDIRECT_HTTP_AUTHORIZATION'], $m))
+        return $m[1];
+
+    // Si no se encontró el token, se devuelve null.
     return null;
 }
 
-// ==============================================
-// CARGA DE CONTROLADORES Y MODELOS
-// ==============================================
-
+/* ==========================
+   CONTROLADORES
+   Importación e instanciación de cada controlador de la API.
+========================== */
 require_once __DIR__ . '/../controllers/UserController.php';
-require_once __DIR__ . '/../models/User.php';
+require_once __DIR__ . '/../controllers/ProductController.php';
+require_once __DIR__ . '/../controllers/CarritoController.php';
+require_once __DIR__ . '/../controllers/CompraController.php';
+require_once __DIR__ . '/../controllers/TicketController.php';
 
-// Carga el módulo de productos solo si está presente en el proyecto
-$productController = null;
-$productPath = __DIR__ . '/../controllers/ProductController.php';
+// Instancia de cada controlador, disponible para las rutas.
+$userController = new UserController();
+$productController = new ProductController();
+$carritoController = new CarritoController();
+$compraController = new CompraController();
+$ticketController = new TicketController();
 
-if (file_exists($productPath)) {
-    require_once $productPath;
+/* ==========================
+   URI
+   Obtiene y normaliza la ruta solicitada por el cliente.
+========================== */
 
-    if (class_exists('ProductController')) {
-        $productController = new ProductController();
-    }
-}
+// Obtiene la URI en bruto.
+$uri = $_SERVER['REQUEST_URI'];
 
-// ==============================================
-// PROCESAMIENTO DE LA URL
-// ==============================================
+// Elimina el prefijo "/api_proyecto/public" para quedarnos solo con la ruta real.
+$uri = str_replace('/api_proyecto/public', '', $uri);
 
-$uri = parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH);
+// Elimina query strings si existen (ej: ?page=2).
+$uri = strtok($uri, '?');
 
-// Prefijo de la carpeta pública
-$basePath = '/api_proyecto/public';
-
-// Quita el prefijo base para obtener solo la ruta real consultada
-if (strpos($uri, $basePath) === 0) {
-    $uri = substr($uri, strlen($basePath));
-}
-
-// Normaliza la ruta final
-$uri = rtrim($uri, '/') ?: '/';
+// Método HTTP (GET, POST, PUT, DELETE...)
 $method = $_SERVER['REQUEST_METHOD'];
 
-// ==============================================
-// INSTANCIAS
-// ==============================================
-
-$userModel = new User();
-$userController = new UserController();
-
-// ==============================================
-// ENRUTAMIENTO PRINCIPAL
-// ==============================================
+/* ==========================
+   RUTAS
+   Router manual basado en switch(true).
+========================== */
 
 switch (true) {
 
-    // -------- Usuarios --------
+    /* ==========================
+       USERS
+    =========================== */
 
-    // Registro de usuario
-    case $uri === '/users/register' && $method === 'POST':
-        $data = readBody();
-        $userController->register($data);
-        break;
-
-    // Login de usuario
     case $uri === '/users/login' && $method === 'POST':
-        $data = readBody();
-        $userController->login($data);
+        $userController->login(readBody());
         break;
 
-    // Listado general de usuarios (requiere rol admin)
-    case $uri === '/users' && $method === 'GET':
-        $token = getBearerToken();
-        $authUser = $userModel->findByToken($token);
-        $userController->getAll($authUser);
+    case $uri === '/users/register' && $method === 'POST':
+        $userController->register(readBody());
         break;
 
-    // -------- Productos --------
+    /* ==========================
+       PRODUCTS
+    =========================== */
 
     case $uri === '/products' && $method === 'GET':
-        if (!$productController) {
-            Response::json(['mensaje' => 'Módulo de productos no disponible'], 501);
-            break;
-        }
         $productController->getAll();
         break;
 
-    case $uri === '/products' && $method === 'POST':
-        if (!$productController) {
-            Response::json(['mensaje' => 'Módulo de productos no disponible'], 501);
-            break;
-        }
+    /* ==========================
+       CARRITO
+    =========================== */
 
-        // Valida token y rol antes de crear un producto
-        $token = getBearerToken();
-        $authUser = $userModel->findByToken($token);
-
-        $productController->create($authUser);
+    // Obtener carrito del usuario autenticado.
+    case $uri === '/carrito' && $method === 'GET':
+        $carritoController->obtener(getBearerToken());
         break;
 
-    // Obtiene producto por ID
-    case preg_match('/\/products\/(\d+)/', $uri, $m) && $method === 'GET':
-        if (!$productController) {
-            Response::json(['mensaje' => 'Módulo de productos no disponible'], 501);
-            break;
-        }
-        $productController->get($m[1]);
+    // Agregar producto al carrito.
+    case $uri === '/carrito/agregar' && $method === 'POST':
+        $carritoController->agregar(getBearerToken(), readBody());
         break;
 
-    // Actualiza producto por ID
-    case preg_match('/\/products\/(\d+)/', $uri, $m) && $method === 'PUT':
-        if (!$productController) {
-            Response::json(['mensaje' => 'Módulo de productos no disponible'], 501);
-            break;
-        }
-
-        $token = getBearerToken();
-        $authUser = $userModel->findByToken($token);
-
-        $productController->update($m[1], $authUser);
+    // Actualizar cantidad por ID de detalle del carrito.
+    case preg_match('/^\/carrito\/actualizar\/(\d+)$/', $uri, $m) && $method === 'PUT':
+        $carritoController->actualizar(getBearerToken(), (int)$m[1], readBody());
         break;
 
-    // Elimina producto por ID
-    case preg_match('/\/products\/(\d+)/', $uri, $m) && $method === 'DELETE':
-        if (!$productController) {
-            Response::json(['mensaje' => 'Módulo de productos no disponible'], 501);
-            break;
-        }
-
-        $token = getBearerToken();
-        $authUser = $userModel->findByToken($token);
-
-        $productController->delete($m[1], $authUser);
+    // Eliminar ítem del carrito por su ID de detalle.
+    case preg_match('/^\/carrito\/eliminar\/(\d+)$/', $uri, $m) && $method === 'DELETE':
+        $carritoController->eliminar(getBearerToken(), (int)$m[1]);
         break;
 
-    // Ruta no encontrada
+    // Vaciar el carrito completo.
+    case $uri === '/carrito/vaciar' && $method === 'DELETE':
+        $carritoController->vaciar(getBearerToken());
+        break;
+
+    /* ==========================
+       COMPRAS
+    =========================== */
+
+    // Finalizar compra.
+    case $uri === '/compras/finalizar' && $method === 'POST':
+        $compraController->finalizarCompra(getBearerToken());
+        break;
+
+    // Listar compras del usuario.
+    case $uri === '/compras' && $method === 'GET':
+        $compraController->listarCompras(getBearerToken());
+        break;
+
+    /* ==========================
+       TICKETS
+       Importante:
+       Primero ruta de ticket por compra,
+       luego descarga del PDF
+    =========================== */
+
+    // Obtener ticket según el ID de compra.
+    case preg_match('/^\/ticket\/compra\/(\d+)$/', $uri, $m) && $method === 'GET':
+        $ticketController->obtenerPorCompra((int)$m[1]);
+        break;
+
+    // Descargar archivo PDF del ticket según número.
+    case preg_match('/^\/ticket\/([A-Za-z0-9\-]+)$/', $uri, $m) && $method === 'GET':
+        $ticketController->descargar($m[1]);
+        break;
+
+    /* ==========================
+       RUTA NO ENCONTRADA (404)
+    =========================== */
     default:
-        Response::json(['mensaje' => 'Ruta no encontrada', 'uri' => $uri], 404);
+        Response::json(["error" => "Ruta no encontrada", "ruta" => $uri], 404);
         break;
 }

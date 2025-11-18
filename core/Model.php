@@ -1,14 +1,11 @@
 <?php
-/**
- * Clase base para todos los modelos
- */
-require_once __DIR__ . '/../config/Bd.php';
+require_once __DIR__ . '/../config/database.php';
 
 class Model {
     protected $db;
 
     public function __construct() {
-        $database = new Bd();
+        $database = new Database();
         $this->db = $database->connect();
     }
 }
